@@ -1,0 +1,12 @@
+{
+  "name": "opencode-context-meter",
+  "version": "1.0.0",
+  "description": "Context window diagnostics for the OpenCode TUI sidebar.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --experimental-strip-types test-core.ts",
+    "install:plugin": "node install.mjs",
+    "uninstall:plugin": "node uninstall.mjs"
+  }
+}

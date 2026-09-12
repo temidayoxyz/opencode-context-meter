@@ -1,0 +1,4 @@
+trace.log
+theme.json
+node_modules/
+*.tsbuildinfo
