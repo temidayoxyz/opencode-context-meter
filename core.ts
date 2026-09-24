@@ -72,12 +72,6 @@ export const MAX_COLS = 30
 export const BAR_COLS = 18
 export const SPARK_COLS = 22
 
-/** Cap a rendered line. Lives here so no caller can forget it. */
-export function clamp(text: string, cols: number): string {
-  const w = Math.max(8, Math.min(MAX_COLS, Math.floor(cols) || MAX_COLS))
-  return text.length > w ? text.slice(0, w) : text
-}
-
 export type Tone = "base" | "muted" | "action" | "warn"
 export type SidebarLine = { text: string; tone: Tone }
 export type Cfg = ReturnType<typeof config>
@@ -542,6 +536,12 @@ function turns(u: any) {
  * line ever exceeds the cap, which is the guarantee that this plugin cannot
  * widen the sidebar.
  */
+export function bar(fraction: number, cols: number) {
+  const w = Math.max(4, Math.min(MAX_COLS, cols | 0))
+  const filled = Math.max(0, Math.min(w, Math.round((Number.isFinite(fraction) ? fraction : 0) * w)))
+  return "\u2588".repeat(filled) + "\u2591".repeat(w - filled)
+}
+
 export function sidebarLines(u: any, cfg: Cfg, expanded: boolean, cols: number): SidebarLine[] {
   const width = Math.max(16, Math.min(MAX_COLS, Math.floor(cols) || MAX_COLS))
   const barW = Math.max(4, Math.min(BAR_COLS, width - 12))
