@@ -230,22 +230,6 @@ export async function loadCompaction(ctx: any, location: any) {
 
 // ---------------------------------------------------- compaction counting ---
 
-/**
- * Count compactions across the WHOLE session.
- *
- * The server pages messages 50 at a time with a bidirectional cursor, and the
- * TUI only holds the newest page — so counting from the loaded window would
- * silently miss older compactions. Instead walk `type: "compaction"` pages,
- * which return only compaction rows: tiny payloads regardless of session size.
- *
- * Uses context.client directly rather than data.session.message.loadMore() so
- * the TUI's own message store is never disturbed or re-rendered.
- */
-export type CompactionInfo = { count: number; truncated: boolean; loaded: boolean }
-
-const compactionCounts = new Map<string, CompactionInfo>()
-const compactionPending = new Set<string>()
-
 export function getCompactionInfo(sessionID: string): CompactionInfo {
   return compactionCounts.get(sessionID) ?? { count: 0, truncated: false, loaded: false }
 }
@@ -364,18 +348,13 @@ export function readUsage(ctx: any, sessionID: string, burnWindow: number) {
     return null
   }
 
-  // The server's message endpoint returns NEWEST-first, and the TUI data layer
-  // does not guarantee it reverses that. Never rely on array position.
-  const ordered = [...messages].sort((a: any, b: any) => (a?.time?.created ?? 0) - (b?.time?.created ?? 0))
-  traceOrderOnce(sessionID, messages, ordered)
-
   // Respect an undo: only consider messages before the revert boundary.
   const revertID = session.revert?.messageID
-  let usable = ordered
   if (revertID) {
-    const at = ordered.findIndex((m: any) => m?.id === revertID)
-    if (at > 0) usable = ordered.slice(0, at)
+    const at = messages.findIndex((m: any) => m?.id === revertID)
+    if (at > 0) messages = messages.slice(0, at)
   }
+  const usable = messages
 
   const assistants: any[] = []
   for (const m of usable) {
@@ -418,11 +397,9 @@ export function readUsage(ctx: any, sessionID: string, burnWindow: number) {
 
   // Runway is measured to the compaction ceiling, not the raw model limit.
   // Using the raw limit overstates how far the session can actually run.
-  const ceiling = compactionCeiling(limit)
-  const buffer = compactionBuffer(limit)
   let turnsLeft: number | undefined
-  if (ceiling !== undefined && avgBurn > 0) {
-    turnsLeft = Math.max(0, Math.floor((ceiling - total) / avgBurn))
+  if (limit && avgBurn > 0) {
+    turnsLeft = Math.floor((limit - total) / avgBurn)
   }
 
   let userCount = 0
@@ -536,12 +513,6 @@ function turns(u: any) {
  * line ever exceeds the cap, which is the guarantee that this plugin cannot
  * widen the sidebar.
  */
-export function bar(fraction: number, cols: number) {
-  const w = Math.max(4, Math.min(MAX_COLS, cols | 0))
-  const filled = Math.max(0, Math.min(w, Math.round((Number.isFinite(fraction) ? fraction : 0) * w)))
-  return "\u2588".repeat(filled) + "\u2591".repeat(w - filled)
-}
-
 export function sidebarLines(u: any, cfg: Cfg, expanded: boolean, cols: number): SidebarLine[] {
   const width = Math.max(16, Math.min(MAX_COLS, Math.floor(cols) || MAX_COLS))
   const barW = Math.max(4, Math.min(BAR_COLS, width - 12))
@@ -586,8 +557,6 @@ export function sidebarLines(u: any, cfg: Cfg, expanded: boolean, cols: number):
   ]
   if (u.cacheWrite > 0) comp.push(["cwrite", u.cacheWrite])
   for (const [label, value] of comp) {
-    // A 0% bar is noise; omit the row entirely.
-    if (value <= 0) continue
     bars.push({
       text:
         (label + " ").padEnd(7) +
@@ -596,17 +565,6 @@ export function sidebarLines(u: any, cfg: Cfg, expanded: boolean, cols: number):
       tone: "muted",
     })
   }
-
-  // Growth trend: context size per turn. Scaled to the series peak by default,
-  // because scaling to the absolute ceiling renders a flat row of empty glyphs
-  // for any session below ~25% — hiding the trajectory it exists to show.
-  const series = u.turnTotals ?? []
-  let sparkScale = u.ceiling ?? u.limit ?? 0
-  if (cfg.trendScale === "auto") {
-    sparkScale = series.length ? Math.max(...series) : 0
-  }
-  const spark = series.length ? sparkline(series, sparkCols, sparkScale, cfg.barStyle) : ""
-  if (spark) bars.push({ text: "trend  " + spark, tone: "muted" })
 
   // Interleave a blank row so no two bars are ever vertically adjacent.
   for (let i = 0; i < bars.length; i++) {
