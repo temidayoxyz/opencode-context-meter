@@ -589,6 +589,8 @@ export function sidebarLines(u: any, cfg: Cfg, expanded: boolean, cols: number):
   ]
   if (u.cacheWrite > 0) comp.push(["cwrite", u.cacheWrite])
   for (const [label, value] of comp) {
+    // A 0% bar is noise; omit the row entirely.
+    if (value <= 0) continue
     bars.push({
       text:
         (label + " ").padEnd(7) +
