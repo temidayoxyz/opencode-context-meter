@@ -397,9 +397,14 @@ export function readUsage(ctx: any, sessionID: string, burnWindow: number) {
 
   // Runway is measured to the compaction ceiling, not the raw model limit.
   // Using the raw limit overstates how far the session can actually run.
+  // Runway is measured to the compaction ceiling, not the raw model limit.
+  // Using the raw limit overstates how far the session can actually run:
+  // on a 1M model the real ceiling is 943,719.
+  const ceiling = compactionCeiling(limit)
+  const buffer = compactionBuffer(limit)
   let turnsLeft: number | undefined
-  if (limit && avgBurn > 0) {
-    turnsLeft = Math.floor((limit - total) / avgBurn)
+  if (ceiling !== undefined && avgBurn > 0) {
+    turnsLeft = Math.max(0, Math.floor((ceiling - total) / avgBurn))
   }
 
   let userCount = 0
