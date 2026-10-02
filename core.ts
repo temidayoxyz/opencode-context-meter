@@ -354,7 +354,18 @@ export function readUsage(ctx: any, sessionID: string, burnWindow: number) {
     const at = messages.findIndex((m: any) => m?.id === revertID)
     if (at > 0) messages = messages.slice(0, at)
   }
-  const usable = messages
+  // The server's message endpoint returns NEWEST-first, and the TUI data layer
+  // does not guarantee it reverses that. Never rely on array position.
+  const ordered = [...messages].sort((a: any, b: any) => (a?.time?.created ?? 0) - (b?.time?.created ?? 0))
+  traceOrderOnce(sessionID, messages, ordered)
+
+  // Respect an undo: only consider messages before the revert boundary.
+  const revertID = session.revert?.messageID
+  let usable = ordered
+  if (revertID) {
+    const at = ordered.findIndex((m: any) => m?.id === revertID)
+    if (at > 0) usable = ordered.slice(0, at)
+  }
 
   const assistants: any[] = []
   for (const m of usable) {
