@@ -230,6 +230,22 @@ export async function loadCompaction(ctx: any, location: any) {
 
 // ---------------------------------------------------- compaction counting ---
 
+/**
+ * Count compactions across the WHOLE session.
+ *
+ * The server pages messages 50 at a time with a bidirectional cursor, and the
+ * TUI only holds the newest page — so counting from the loaded window would
+ * silently miss older compactions. Instead walk `type: "compaction"` pages,
+ * which return only compaction rows: tiny payloads regardless of session size.
+ *
+ * Uses context.client directly rather than data.session.message.loadMore() so
+ * the TUI's own message store is never disturbed or re-rendered.
+ */
+export type CompactionInfo = { count: number; truncated: boolean; loaded: boolean }
+
+const compactionCounts = new Map<string, CompactionInfo>()
+const compactionPending = new Set<string>()
+
 export function getCompactionInfo(sessionID: string): CompactionInfo {
   return compactionCounts.get(sessionID) ?? { count: 0, truncated: false, loaded: false }
 }
