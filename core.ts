@@ -598,6 +598,17 @@ export function sidebarLines(u: any, cfg: Cfg, expanded: boolean, cols: number):
     })
   }
 
+  // Growth trend: context size per turn. Scaled to the series peak by default,
+  // because scaling to the absolute ceiling renders a flat row of empty glyphs
+  // for any session below ~25% — hiding the trajectory it exists to show.
+  const series = u.turnTotals ?? []
+  let sparkScale = u.ceiling ?? u.limit ?? 0
+  if (cfg.trendScale === "auto") {
+    sparkScale = series.length ? Math.max(...series) : 0
+  }
+  const spark = series.length ? sparkline(series, sparkCols, sparkScale, cfg.barStyle) : ""
+  if (spark) bars.push({ text: "trend  " + spark, tone: "muted" })
+
   // Interleave a blank row so no two bars are ever vertically adjacent.
   for (let i = 0; i < bars.length; i++) {
     push(bars[i].text, bars[i].tone)
