@@ -364,12 +364,6 @@ export function readUsage(ctx: any, sessionID: string, burnWindow: number) {
     return null
   }
 
-  // Respect an undo: only consider messages before the revert boundary.
-  const revertID = session.revert?.messageID
-  if (revertID) {
-    const at = messages.findIndex((m: any) => m?.id === revertID)
-    if (at > 0) messages = messages.slice(0, at)
-  }
   // The server's message endpoint returns NEWEST-first, and the TUI data layer
   // does not guarantee it reverses that. Never rely on array position.
   const ordered = [...messages].sort((a: any, b: any) => (a?.time?.created ?? 0) - (b?.time?.created ?? 0))
@@ -424,9 +418,6 @@ export function readUsage(ctx: any, sessionID: string, burnWindow: number) {
 
   // Runway is measured to the compaction ceiling, not the raw model limit.
   // Using the raw limit overstates how far the session can actually run.
-  // Runway is measured to the compaction ceiling, not the raw model limit.
-  // Using the raw limit overstates how far the session can actually run:
-  // on a 1M model the real ceiling is 943,719.
   const ceiling = compactionCeiling(limit)
   const buffer = compactionBuffer(limit)
   let turnsLeft: number | undefined

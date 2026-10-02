@@ -157,7 +157,10 @@ export default Plugin.define({
                       title: "Context meter: toggle detail",
                       group: "Context",
                       bind: cfg.bind,
-                      slash: { name: "context" },
+                      // Deliberately not "context": the router already owns a
+                      // /context route, and a slash-name collision fails
+                      // silently.
+                      slash: { name: "contextmeter" },
                       run: () => {
                         expandedFor.has(sessionID)
                           ? expandedFor.delete(sessionID)
