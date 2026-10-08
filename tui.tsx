@@ -12,7 +12,9 @@ import { Plugin } from "@opencode/plugin/tui"
 import {
   bytes,
   config,
+  currentSessionID,
   DEFAULTS,
+  getCompactionInfo,
   loadCompaction,
   loadCompactionCount,
   num,
@@ -25,6 +27,14 @@ import {
 
 /** Expanded view is per-session so two open tabs keep their own state. */
 const expandedFor = new Set<string>()
+
+/** One-shot lifecycle markers, so a blank sidebar is diagnosable from the log. */
+const traced = new Set<string>()
+function traceOnce(event: string, data?: unknown) {
+  if (traced.has(event)) return
+  traced.add(event)
+  trace(event, data)
+}
 
 /**
  * message.list() returns [] until the transcript is fetched. Kick off the sync
@@ -94,9 +104,16 @@ function Meter(props: { ctx: any; sessionID: string; expanded: boolean; cfg: any
 }
 
 /** The diagnostic stack, rendered as plain strings so it can be width-capped. */
-function Detail(props: { ctx: any; sessionID: string; expanded: boolean; cfg: any; cols: number }) {
-  const { ctx, sessionID, expanded, cfg, cols } = props
-  const u = readUsage(ctx, sessionID, cfg.burnWindow)
+function Detail(props: {
+  ctx: any
+  sessionID: string
+  expanded: boolean
+  cfg: any
+  cols: number
+  compaction: any
+}) {
+  const { ctx, sessionID, expanded, cfg, cols, compaction } = props
+  const u = readUsage(ctx, sessionID, cfg.burnWindow, compaction)
   if (!u) return null
   const th = ctx.theme?.text ?? {}
   const toneColor: Record<string, string> = {
@@ -128,6 +145,15 @@ export default Plugin.define({
     try {
       const cfg = config(context.options)
 
+      // The single reactive channel. `context.storage.memory` state IS reactive
+      // (measured: a 300ms mutation produced exactly one re-render per tick),
+      // whereas plain module state is not. The compaction count is fetched
+      // asynchronously and arrives after first paint, so without a reactive
+      // landing point the row would never appear.
+      const [compaction, setCompaction] = context.storage.memory("compaction", {
+        initial: {} as Record<string, any>,
+      })
+
       // Resolve the server's compaction settings once, best effort.
       try {
         const p = loadCompaction(context, context.data?.session?.list?.()?.[0]?.location)
@@ -138,11 +164,28 @@ export default Plugin.define({
         append: "sidebar.content",
         render(props: any) {
           try {
-            const sessionID: string | undefined = props?.sessionID ?? props?.session?.id
-            if (!sessionID) return null
+            // Traced on every render: a headless run never mounts this slot, so
+            // the absence of this line is how you tell "not mounted" apart from
+            // "mounted but failing".
+            trace("render:enter")
+            // props.sessionID is NOT populated for sidebar.content. Resolve the
+            // session through the host instead, falling back to props only as a
+            // last resort - reading the wrong value here silently disables every
+            // row, because the session lookup then misses.
+            const sessionID: string | undefined =
+              currentSessionID(context) ?? props?.sessionID ?? props?.session?.id
+            if (!sessionID) {
+              trace("render:no-session-id", { propKeys: props ? Object.keys(props).slice(0, 12) : null })
+              return null
+            }
+            traceOnce("render:ok", { sessionID })
 
             ensureSynced(context, sessionID)
-            loadCompactionCount(context, sessionID)
+            loadCompactionCount(context, sessionID, 20, (id, info) => {
+              setCompaction((draft: any) => {
+                draft[id] = info
+              })
+            })
 
             // keymap.layer() throws "Keymap.Provider is missing" when called
             // from setup(), so it must be registered from inside a slot render.
@@ -178,7 +221,16 @@ export default Plugin.define({
 
             const expanded = cfg.detailed || expandedFor.has(sessionID)
             const cols = props?.width ?? props?.cols ?? DEFAULTS.warnAt
-            return <Detail ctx={context} sessionID={sessionID} expanded={expanded} cfg={cfg} cols={cols} />
+            return (
+              <Detail
+                ctx={context}
+                sessionID={sessionID}
+                expanded={expanded}
+                cfg={cfg}
+                cols={cols}
+                compaction={(compaction as any)?.[sessionID]}
+              />
+            )
           } catch (e: any) {
             trace("render:failed", { err: String(e?.message ?? e) })
             return null
@@ -186,9 +238,10 @@ export default Plugin.define({
         },
       })
 
+      traceOnce("setup:slot-registered", { slot: "sidebar.content" })
       return () => {}
     } catch (e: any) {
-      trace("setup:failed", { err: String(e?.message ?? e) })
+      trace("setup:failed", { err: String(e?.stack ?? e) })
       return () => {}
     }
   },
