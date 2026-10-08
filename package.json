@@ -4,8 +4,13 @@
   "description": "Context window diagnostics for the OpenCode TUI sidebar.",
   "type": "module",
   "private": true,
+  "exports": {
+    "./tui": "./tui.tsx"
+  },
   "scripts": {
     "test": "node --experimental-strip-types test-core.ts",
+    "install": "node install.mjs",
+    "uninstall": "node uninstall.mjs",
     "install:plugin": "node install.mjs",
     "uninstall:plugin": "node uninstall.mjs"
   }
