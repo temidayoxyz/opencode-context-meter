@@ -2,8 +2,8 @@
  * Idempotent installer. Backs up cli.json, refuses to write a config that would
  * not parse, and touches no key other than `plugins`.
  */
-import { readFileSync, writeFileSync, existsSync, copyFileSync } from "node:fs"
-import { join, dirname, relative, isAbsolute as pathIsAbsolute, sep } from "node:path"
+import { readFileSync, writeFileSync, existsSync, copyFileSync, mkdirSync } from "node:fs"
+import { join, dirname, sep } from "node:path"
 import { homedir } from "node:os"
 import { fileURLToPath } from "node:url"
 
@@ -21,7 +21,20 @@ function fail(msg) {
 
 const dir = configDir()
 const cliPath = join(dir, "cli.json")
-if (!existsSync(cliPath)) fail(`no cli.json at ${cliPath}`)
+
+// A fresh OpenCode install may have no cli.json at all: it is created on first
+// auth, not on first run. Aborting there would make installation impossible for
+// exactly the users who have not set anything up yet, so bootstrap an empty one.
+let bootstrapped = false
+if (!existsSync(cliPath)) {
+  try {
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(cliPath, "{}\n", "utf8")
+    bootstrapped = true
+  } catch (e) {
+    fail(`could not create ${cliPath} (${e.message}); nothing was written`)
+  }
+}
 
 let cfg
 try {
@@ -33,9 +46,14 @@ if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) {
   fail("cli.json is not a JSON object; nothing was written")
 }
 
+// Always an absolute file:// URL.
+//
+// A relative specifier looks tidier but is resolved against an unspecified base
+// (CWD in some hosts, the config dir in others), so a clone that is not a
+// direct sibling of .config/opencode registers a path that silently points at
+// nothing on the next start. Absolute is unambiguous everywhere.
 const abs = here.split(sep).join("/")
-const rel = relative(dir, here)
-const specifier = pathIsAbsolute(rel) || /^[A-Za-z]:/.test(rel) ? `file:///${abs}` : rel.split(sep).join("/")
+const specifier = `file:///${abs}`
 
 const existing = Array.isArray(cfg.plugins) ? cfg.plugins : []
 const kept = existing.filter((p) => {
@@ -55,4 +73,6 @@ try {
 }
 writeFileSync(cliPath, out)
 
-console.log(`\n  context-meter installed -> ${specifier}\n  backup: ${backup}\n`)
+console.log(`\n  context-meter installed -> ${specifier}`)
+if (bootstrapped) console.log(`  created a new ${cliPath}`)
+console.log(`  backup: ${backup}\n`)

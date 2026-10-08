@@ -20,7 +20,17 @@ function fail(msg) {
 }
 
 const cliPath = join(configDir(), "cli.json")
-if (!existsSync(cliPath)) fail(`no cli.json at ${cliPath}`)
+// Already uninstalled. Report success rather than failing: the requested end
+// state holds, and an error here only teaches people to ignore the script.
+if (!existsSync(cliPath)) {
+  console.log("\n  context-meter is not registered (no cli.json).\n")
+  if (process.argv.includes("--purge")) {
+    rmSync(here, { recursive: true, force: true })
+    console.log("  plugin folder deleted.\n")
+  }
+  console.log("  Restart the TUI to apply.\n")
+  process.exit(0)
+}
 
 let cfg
 try {
