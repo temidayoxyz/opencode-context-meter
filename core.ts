@@ -245,6 +245,11 @@ export type CompactionInfo = { count: number; truncated: boolean; loaded: boolea
 
 const compactionCounts = new Map<string, CompactionInfo>()
 const compactionPending = new Set<string>()
+/** When the last attempt failed, so retries are spaced instead of storming. */
+const compactionFailedAt = new Map<string, number>()
+
+/** Only a successful walk is treated as final. A failure is retried later. */
+const RETRY_AFTER_MS = 30_000
 
 export function getCompactionInfo(sessionID: string): CompactionInfo {
   return compactionCounts.get(sessionID) ?? { count: 0, truncated: false, loaded: false }
@@ -253,6 +258,7 @@ export function getCompactionInfo(sessionID: string): CompactionInfo {
 export function resetCompactionCounts() {
   compactionCounts.clear()
   compactionPending.clear()
+  compactionFailedAt.clear()
 }
 
 function countCompactionRows(rows: any[]): number {
@@ -262,26 +268,93 @@ function countCompactionRows(rows: any[]): number {
   return rows.filter((m) => m?.status === undefined || m?.status === "completed").length
 }
 
-export async function loadCompactionCount(ctx: any, sessionID: string, maxPages = 20) {
-  if (!sessionID || compactionCounts.has(sessionID) || compactionPending.has(sessionID)) return
+const PAGE_TIMEOUT_MS = 5000
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`timed out after ${ms}ms (${label})`)), ms)
+    Promise.resolve(p).then(
+      (v) => {
+        clearTimeout(t)
+        resolve(v)
+      },
+      (e) => {
+        clearTimeout(t)
+        reject(e)
+      },
+    )
+  })
+}
+
+/**
+ * Fetch the count and hand it to `onResult`.
+ *
+ * The count MUST arrive through a reactive channel or the row never appears:
+ * a plain Map is not observed by the host, so writing to one produces no
+ * re-render and the sidebar keeps showing the pre-fetch value until something
+ * unrelated happens to redraw. `onResult` is wired to context.storage.memory by
+ * tui.tsx, which is verified reactive.
+ *
+ * The timeout is not defensive decoration. A request that never settles would
+ * otherwise leave `compactionPending` set forever, and the guard would refuse
+ * every retry for the life of the process - the feature would be permanently
+ * dead with no error anywhere.
+ */
+export async function loadCompactionCount(
+  ctx: any,
+  sessionID: string,
+  maxPages = 20,
+  onResult?: (sessionID: string, info: CompactionInfo) => void,
+  timeoutMs = PAGE_TIMEOUT_MS,
+) {
+  if (!sessionID) {
+    trace("compactions:skip", { reason: "no sessionID" })
+    return
+  }
+  if (compactionPending.has(sessionID)) {
+    trace("compactions:skip", { sessionID, reason: "already in flight" })
+    return
+  }
+  if (compactionCounts.has(sessionID)) {
+    trace("compactions:skip", { sessionID, reason: "already counted" })
+    return
+  }
+  const failedAt = compactionFailedAt.get(sessionID)
+  if (failedAt !== undefined && Date.now() - failedAt < RETRY_AFTER_MS) {
+    trace("compactions:skip", { sessionID, reason: "backing off after a failure" })
+    return
+  }
+
   compactionPending.add(sessionID)
   try {
     let cursor: any
     let count = 0
     let truncated = false
     for (let page = 0; page < maxPages; page++) {
-      const res = await ctx.client.message.list({ sessionID, limit: 50, type: "compaction", cursor })
+      const res = await withTimeout(
+        ctx.client.message.list({ sessionID, limit: 50, type: "compaction", cursor }),
+        timeoutMs,
+        `page ${page}`,
+      )
       count += countCompactionRows(res?.data ?? [])
       const prev = res?.cursor?.previous
       if (!prev) break
       cursor = prev
       if (page === maxPages - 1) truncated = true
     }
-    compactionCounts.set(sessionID, { count, truncated, loaded: true })
+    const info: CompactionInfo = { count, truncated, loaded: true }
+    compactionCounts.set(sessionID, info)
+    compactionFailedAt.delete(sessionID)
+    onResult?.(sessionID, info)
     trace("compactions:counted", { sessionID, count, truncated })
   } catch (e: any) {
     trace("compactions:failed", { sessionID, err: String(e?.message ?? e) })
-    compactionCounts.set(sessionID, { count: 0, truncated: false, loaded: false })
+    // Deliberately NOT cached as an answer. Caching the failure would make the
+    // guard refuse every retry and the row would be dead for the rest of the
+    // session. Back off instead, and tell the UI we have no count yet so it
+    // makes no claim rather than showing a stale one.
+    compactionFailedAt.set(sessionID, Date.now())
+    onResult?.(sessionID, { count: 0, truncated: false, loaded: false })
   } finally {
     compactionPending.delete(sessionID)
   }
@@ -351,7 +424,13 @@ function traceOrderOnce(sessionID: string, raw: any[], ordered: any[]) {
   })
 }
 
-export function readUsage(ctx: any, sessionID: string, burnWindow: number) {
+/**
+ * `compaction` is passed in rather than read from module state so the caller
+ * controls reactivity: a plain Map is invisible to the host's observer, so a
+ * count fetched after first paint would never trigger a redraw. tui.tsx reads it
+ * from a context.storage.memory store, which is verified reactive.
+ */
+export function readUsage(ctx: any, sessionID: string, burnWindow: number, compaction?: CompactionInfo) {
   const session = ctx.data.session.get(sessionID)
   if (!session) {
     trace("readUsage:no-session", { sessionID })
@@ -446,7 +525,7 @@ export function readUsage(ctx: any, sessionID: string, burnWindow: number) {
     avgBurn,
     lastBurn: growth.length ? growth[growth.length - 1] : 0,
     turnTotals,
-    compaction: getCompactionInfo(sessionID),
+    compaction: compaction ?? getCompactionInfo(sessionID),
     turnsLeft,
     ceiling,
     buffer,
@@ -471,15 +550,24 @@ function safe(fn: () => unknown) {
   }
 }
 
+/**
+ * Probe for the active session id.
+ *
+ * Measured on v2.0.25: only `ui.router.current().sessionID` and
+ * `ui.tabs.list()[0].sessionID` are populated. `panel.current()` and the other
+ * router shapes return undefined, and `props.sessionID` is NOT passed to
+ * `sidebar.content` at all - only to the `prompt.*` slots.
+ *
+ * Returns undefined rather than guessing. A wrong id is worse than none: the
+ * session lookup misses, `readUsage` returns null, and the sidebar renders
+ * nothing at all with no error to explain it.
+ */
 export function currentSessionID(ctx: any): string | undefined {
   const probes: Array<[string, () => unknown]> = [
     ["router.sessionID", () => ctx.ui.router.current()?.sessionID],
-    ["router.session.id", () => (ctx.ui.router.current() as any)?.session?.id],
-    ["router.data.sessionID", () => (ctx.ui.router.current() as any)?.data?.sessionID],
-    ["panel.sessionID", () => ctx.ui.panel.current()?.sessionID],
-    ["panel.session.id", () => (ctx.ui.panel.current() as any)?.session?.id],
     ["tabs.focused", () => (ctx.ui.tabs.list?.() ?? []).find((t: any) => t?.focused)?.sessionID],
     ["tabs.first", () => (ctx.ui.tabs.list?.() ?? [])[0]?.sessionID],
+    ["most-recent", () => (ctx.data?.session?.list?.() ?? []).slice().sort((a: any, b: any) => (b?.time?.updated ?? 0) - (a?.time?.updated ?? 0))[0]?.id],
   ]
   for (const [via, fn] of probes) {
     try {
@@ -494,7 +582,6 @@ export function currentSessionID(ctx: any): string | undefined {
   }
   trace("sessionID unresolved", {
     router: safe(() => ctx.ui.router.current()),
-    panel: safe(() => ctx.ui.panel.current()),
     tabs: safe(() => ctx.ui.tabs.list?.()),
   })
   return undefined
