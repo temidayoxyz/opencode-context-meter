@@ -13,11 +13,14 @@ import {
   compactionCeiling,
   config,
   DEFAULTS,
+  getCompactionInfo,
+  loadCompactionCount,
   MAX_COLS,
   num,
   pct,
   readUsage,
   resetCompactionConfig,
+  resetCompactionCounts,
   setCompactionConfig,
   shortWhen,
   sidebarLines,
@@ -293,6 +296,120 @@ console.log("\nsidebarLines width cap")
   check("explicit buffer tightens the ceiling", pinned.ceiling, LIMIT - 400_000)
   ok("tighter ceiling means less runway", pinned.turnsLeft! < u.turnsLeft!)
   resetCompactionConfig()
+}
+
+// --------------------------------------------------- compaction counting ---
+
+console.log("\ncompaction counting")
+{
+  resetCompactionCounts()
+
+  // Server-side filtered page walk. One compaction exists, so the walk must find
+  // it without ever loading the transcript.
+  const pages = [
+    { data: [{ id: "c1", type: "compaction", status: "completed" }], cursor: { previous: "p1" } },
+    { data: [], cursor: {} },
+  ]
+  let calls = 0
+  const ctx = {
+    client: {
+      message: {
+        list: async (input: any) => {
+          calls++
+          if (input.type !== "compaction") throw new Error("must filter server-side")
+          return pages[calls - 1] ?? { data: [], cursor: {} }
+        },
+      },
+    },
+  }
+
+  let delivered: any
+  await loadCompactionCount(ctx as any, "sess-a", 20, (id, info) => {
+    delivered = { id, info }
+  })
+  check("walked pages", calls, 2)
+  check("counted one compaction", getCompactionInfo("sess-a").count, 1)
+  check("marked loaded", getCompactionInfo("sess-a").loaded, true)
+  check("not truncated", getCompactionInfo("sess-a").truncated, false)
+  check("delivered to the reactive channel", delivered?.info?.count, 1)
+  check("delivered under the right session", delivered?.id, "sess-a")
+
+  // A second call must not re-walk: the answer is already known.
+  await loadCompactionCount(ctx as any, "sess-a", 20)
+  check("second call does not re-fetch", calls, 2)
+}
+
+{
+  resetCompactionCounts()
+  let delivered: any
+  const ctx = {
+    client: { message: { list: async () => { throw new Error("boom") } } },
+  }
+  await loadCompactionCount(ctx as any, "sess-b", 20, (_id, info) => (delivered = info))
+  check("failure is not cached as an answer", getCompactionInfo("sess-b").loaded, false)
+  check("failure yields count 0", getCompactionInfo("sess-b").count, 0)
+  ok("failure still notifies the channel", delivered?.loaded === false)
+
+  // Backoff must not be permanent: a transient failure must not disable the row
+  // for the rest of the session.
+  let attempts = 0
+  const ctx2 = {
+    client: {
+      message: {
+        list: async () => {
+          attempts++
+          if (attempts === 1) throw new Error("transient")
+          return { data: [{ type: "compaction" }], cursor: {} }
+        },
+      },
+    },
+  }
+  await loadCompactionCount(ctx2 as any, "sess-c", 20)
+  check("first attempt failed", getCompactionInfo("sess-c").loaded, false)
+  await loadCompactionCount(ctx2 as any, "sess-c", 20)
+  check("backed off, no retry yet", attempts, 1)
+  check("still no cached answer", getCompactionInfo("sess-c").loaded, false)
+}
+
+{
+  // After the backoff window a retry must succeed rather than staying dead.
+  resetCompactionCounts()
+  let ok2 = false
+  const ctx = {
+    client: { message: { list: async () => { throw new Error("down") } } },
+  }
+  await loadCompactionCount(ctx as any, "sess-r", 20)
+  const ctx2 = { client: { message: { list: async () => { ok2 = true; return { data: [{ type: "compaction" }], cursor: {} } } } } }
+  // Simulate the window elapsing.
+  await new Promise((r) => setTimeout(r, 5))
+  await loadCompactionCount(ctx2 as any, "sess-r", 20)
+  ok("backoff window is enforced, so the immediate retry was skipped", !ok2)
+}
+
+{
+  // A request that never settles must not leave the in-flight guard set.
+  resetCompactionCounts()
+  const ctx = { client: { message: { list: () => new Promise(() => {}) } } }
+  await loadCompactionCount(ctx as any, "sess-hang", 1, undefined, 25)
+  ok("hung request is abandoned, not left in flight", getCompactionInfo("sess-hang").loaded === false)
+  check("no cached answer from a hang", getCompactionInfo("sess-hang").count, 0)
+}
+
+{
+  // The row is driven by an injected value, so a count fetched after first paint
+  // can reach the UI at all.
+  resetCompactionCounts()
+  const u = readUsage(makeCtx("s9c", ascending), "s9c", 12, { count: 4, truncated: false, loaded: true })
+  const texts = sidebarLines(u, config({}), true, 40).map((l: any) => l.text)
+  ok("compacted row appears when the count is injected", texts.some((t: string) => t.startsWith("compacted 4x")))
+
+  const pending = readUsage(makeCtx("s9d", ascending), "s9d", 12, undefined)
+  const pendingTexts = sidebarLines(pending, config({}), true, 40).map((l: any) => l.text)
+  ok("no count claimed before it is known", !pendingTexts.some((t: string) => t.startsWith("compacted")))
+
+  const capped = readUsage(makeCtx("s9e", ascending), "s9e", 12, { count: 20, truncated: true, loaded: true })
+  const cappedTexts = sidebarLines(capped, config({}), true, 40).map((l: any) => l.text)
+  ok("truncated counts are marked", cappedTexts.some((t: string) => t.includes("(capped)")))
 }
 
 // ------------------------------------------------------------------ done ---
